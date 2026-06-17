@@ -33,13 +33,18 @@ current setup is **ConsolePort**, then clones it into a **KBM** profile
 that KBM copy. The cloned `WTF` keeps your account/realm/character data and login;
 set up your keyboard keybinds once the first time you play in KBM mode.
 
-## Build
+## Get the binary
 
-Requires Go (1.21+). From this folder:
+`wowswitch.exe` is **not committed** to the repo — it's a build artifact.
 
-```
-go build -o wowswitch.exe
-```
+- **Download from CI:** every push builds it on GitHub Actions. Grab the latest
+  `wowswitch-windows-amd64` artifact from the
+  [Actions tab](../../actions) (artifacts expire after ~90 days).
+- **Or build it yourself** — requires Go (1.21+); from this folder:
+
+  ```
+  go build -o wowswitch.exe
+  ```
 
 Then run `wowswitch.exe` (double-click or from a terminal). Make a Desktop
 shortcut to it for convenience.
