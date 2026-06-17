@@ -1,0 +1,5 @@
+# Test sandbox created during manual verification
+_sbtest/
+
+# Go build cache / module download dirs (if ever used locally)
+/bin/
