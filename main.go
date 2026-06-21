@@ -1,10 +1,12 @@
 // wowswitch — switch the live WoW Classic config between a keyboard/mouse
-// setup and a ConsolePort (controller) setup, and keep non-ConsolePort addons
-// synced between the two profiles.
+// setup and a ConsolePort (controller) setup, across every installed game
+// flavor (Anniversary and Classic Era / Season of Discovery), and keep
+// non-ConsolePort addons synced between the two profiles within each flavor.
 //
-// On each run it: (1) syncs non-ConsolePort addons between the active and the
-// dormant profile, then (2) shows a menu to pick KBM or ConsolePort and swaps
-// the live Interface/WTF folders via an instant rename.
+// On each run it, for each installed flavor: (1) syncs non-ConsolePort addons
+// between the active and dormant profile, then after showing a single menu it
+// swaps the live Interface/WTF folders via an instant rename. The chosen mode
+// is applied to all installed flavors at once.
 package main
 
 import (
@@ -20,10 +22,14 @@ import (
 
 // ---- Configuration -------------------------------------------------------
 
-// defaultBase is the game flavor directory that actually contains Interface/
-// and WTF/. Override at runtime with the WOW_BASE environment variable if the
-// game ever lives somewhere else.
-const defaultBase = `C:\Program Files (x86)\World of Warcraft\_anniversary_`
+// defaultRoot is the World of Warcraft install folder that contains the
+// per-flavor directories (_anniversary_, _classic_era_, ...). Override at
+// runtime with the WOW_ROOT environment variable if the game lives elsewhere.
+const defaultRoot = `C:\Program Files (x86)\World of Warcraft`
+
+// flavorDirs are the game flavor subdirectories managed by this tool. Each
+// holds its own Interface/ and WTF/. Missing ones are skipped at runtime.
+var flavorDirs = []string{"_anniversary_", "_classic_era_"}
 
 const (
 	modeKBM = "kbm"
@@ -45,11 +51,37 @@ var bundleFolders = []string{"Interface", "WTF"}
 
 var stdin = bufio.NewReader(os.Stdin)
 
-func base() string {
+// bases returns the flavor base directories the tool should operate on.
+//
+// WOW_BASE (single explicit flavor dir) takes precedence for back-compat and
+// testing; otherwise every flavor under WOW_ROOT (or the default root) is
+// returned, present or not — run() filters to the ones that exist.
+func bases() []string {
 	if v := strings.TrimSpace(os.Getenv("WOW_BASE")); v != "" {
-		return v
+		return []string{v}
 	}
-	return defaultBase
+	root := defaultRoot
+	if v := strings.TrimSpace(os.Getenv("WOW_ROOT")); v != "" {
+		root = v
+	}
+	out := make([]string, 0, len(flavorDirs))
+	for _, f := range flavorDirs {
+		out = append(out, filepath.Join(root, f))
+	}
+	return out
+}
+
+// flavorName turns a flavor base dir into a friendly display name.
+func flavorName(base string) string {
+	n := strings.ToLower(strings.Trim(filepath.Base(base), "_"))
+	switch n {
+	case "anniversary":
+		return "Anniversary"
+	case "classic_era":
+		return "Classic Era (Season of Discovery)"
+	default:
+		return filepath.Base(base)
+	}
 }
 
 func label(mode string) string {
@@ -72,18 +104,18 @@ func other(mode string) string {
 
 // ---- Path helpers --------------------------------------------------------
 
-func livePath(folder string) string { return filepath.Join(base(), folder) }
+func livePath(base, folder string) string { return filepath.Join(base, folder) }
 
-func dormantPath(folder, mode string) string {
-	return filepath.Join(base(), folder+"."+mode)
+func dormantPath(base, folder, mode string) string {
+	return filepath.Join(base, folder+"."+mode)
 }
 
-func markerPath() string { return filepath.Join(base(), markerFile) }
+func markerPath(base string) string { return filepath.Join(base, markerFile) }
 
 // ---- State (marker file) -------------------------------------------------
 
-func readActiveMode() (string, error) {
-	b, err := os.ReadFile(markerPath())
+func readActiveMode(base string) (string, error) {
+	b, err := os.ReadFile(markerPath(base))
 	if err != nil {
 		return "", err
 	}
@@ -94,8 +126,8 @@ func readActiveMode() (string, error) {
 	return m, nil
 }
 
-func writeActiveMode(mode string) error {
-	return os.WriteFile(markerPath(), []byte(mode+"\n"), 0o644)
+func writeActiveMode(base, mode string) error {
+	return os.WriteFile(markerPath(base), []byte(mode+"\n"), 0o644)
 }
 
 // ---- Filesystem helpers --------------------------------------------------
@@ -207,18 +239,18 @@ func isWowRunning() bool {
 
 // ---- Bootstrap & state validation ----------------------------------------
 
-// resolveActiveMode reads the marker, or on a fresh install assumes the current
-// live config is ConsolePort and seeds a KBM profile by cloning it (minus the
-// ConsolePort* addons). It is idempotent.
-func resolveActiveMode() (string, error) {
-	if mode, err := readActiveMode(); err == nil {
+// resolveActiveMode reads the marker for a flavor, or on a fresh install
+// assumes the current live config is ConsolePort and seeds a KBM profile by
+// cloning it (minus the ConsolePort* addons). It is idempotent.
+func resolveActiveMode(base string) (string, error) {
+	if mode, err := readActiveMode(base); err == nil {
 		return mode, nil
 	}
 
 	// First run: live folders must be present.
 	for _, f := range bundleFolders {
-		if !isDir(livePath(f)) {
-			return "", fmt.Errorf("expected live folder %q not found under %s", f, base())
+		if !isDir(livePath(base, f)) {
+			return "", fmt.Errorf("expected live folder %q not found under %s", f, base)
 		}
 	}
 
@@ -229,25 +261,24 @@ func resolveActiveMode() (string, error) {
 	fmt.Printf("Seeding a %s profile from it (this clones Interface + WTF once)...\n", label(inactive))
 
 	for _, f := range bundleFolders {
-		dst := dormantPath(f, inactive)
+		dst := dormantPath(base, f, inactive)
 		if exists(dst) {
 			continue // already seeded (idempotent)
 		}
-		if err := copyTree(livePath(f), dst); err != nil {
+		if err := copyTree(livePath(base, f), dst); err != nil {
 			return "", fmt.Errorf("seeding %s: %w", dst, err)
 		}
 	}
 
 	// Strip ConsolePort* addons from the freshly seeded KBM profile.
-	if err := stripConsolePortAddons(filepath.Join(dormantPath("Interface", inactive), "AddOns")); err != nil {
+	if err := stripConsolePortAddons(filepath.Join(dormantPath(base, "Interface", inactive), "AddOns")); err != nil {
 		return "", fmt.Errorf("stripping ConsolePort addons from KBM profile: %w", err)
 	}
 
-	if err := writeActiveMode(active); err != nil {
+	if err := writeActiveMode(base, active); err != nil {
 		return "", err
 	}
 	fmt.Println("Seed complete.")
-	fmt.Println()
 	return active, nil
 }
 
@@ -269,21 +300,21 @@ func stripConsolePortAddons(addonsDir string) error {
 	return nil
 }
 
-// validateState checks the on-disk invariant and returns a descriptive error
-// (with recovery guidance) if it is broken.
-func validateState(active string) error {
+// validateState checks the on-disk invariant for a flavor and returns a
+// descriptive error (with recovery guidance) if it is broken.
+func validateState(base, active string) error {
 	inactive := other(active)
 	for _, f := range bundleFolders {
-		if !isDir(livePath(f)) {
+		if !isDir(livePath(base, f)) {
 			return fmt.Errorf("live folder %q is missing — a previous switch may have been interrupted.\n"+
-				"  Recover by renaming %s back to %s", f, dormantPath(f, active), livePath(f))
+				"  Recover by renaming %s back to %s", f, dormantPath(base, f, active), livePath(base, f))
 		}
-		if !isDir(dormantPath(f, inactive)) {
-			return fmt.Errorf("dormant folder %q is missing", dormantPath(f, inactive))
+		if !isDir(dormantPath(base, f, inactive)) {
+			return fmt.Errorf("dormant folder %q is missing", dormantPath(base, f, inactive))
 		}
-		if exists(dormantPath(f, active)) {
+		if exists(dormantPath(base, f, active)) {
 			return fmt.Errorf("both live %q and %q exist — inconsistent state from an interrupted switch.\n"+
-				"  Inspect those folders and remove/rename the stale one before retrying", f, dormantPath(f, active))
+				"  Inspect those folders and remove/rename the stale one before retrying", f, dormantPath(base, f, active))
 		}
 	}
 	return nil
@@ -380,33 +411,33 @@ func syncAddons(aDir, bDir string) (copied, updated int, err error) {
 
 // ---- Profile switch ------------------------------------------------------
 
-func switchProfile(from, to string) error {
+func switchProfile(base, from, to string) error {
 	// Pre-checks before touching anything.
 	for _, f := range bundleFolders {
-		if !isDir(dormantPath(f, to)) {
-			return fmt.Errorf("target profile folder %q does not exist", dormantPath(f, to))
+		if !isDir(dormantPath(base, f, to)) {
+			return fmt.Errorf("target profile folder %q does not exist", dormantPath(base, f, to))
 		}
-		if !isDir(livePath(f)) {
-			return fmt.Errorf("live folder %q does not exist", livePath(f))
+		if !isDir(livePath(base, f)) {
+			return fmt.Errorf("live folder %q does not exist", livePath(base, f))
 		}
-		if exists(dormantPath(f, from)) {
-			return fmt.Errorf("stash target %q already exists; refusing to overwrite", dormantPath(f, from))
+		if exists(dormantPath(base, f, from)) {
+			return fmt.Errorf("stash target %q already exists; refusing to overwrite", dormantPath(base, f, from))
 		}
 	}
 
 	// Stash the live (active) folders, then promote the target folders.
 	for _, f := range bundleFolders {
-		if err := os.Rename(livePath(f), dormantPath(f, from)); err != nil {
+		if err := os.Rename(livePath(base, f), dormantPath(base, f, from)); err != nil {
 			return fmt.Errorf("stashing %s: %w", f, err)
 		}
 	}
 	for _, f := range bundleFolders {
-		if err := os.Rename(dormantPath(f, to), livePath(f)); err != nil {
-			return fmt.Errorf("activating %s (PARTIAL STATE — see folders under %s): %w", f, base(), err)
+		if err := os.Rename(dormantPath(base, f, to), livePath(base, f)); err != nil {
+			return fmt.Errorf("activating %s (PARTIAL STATE — see folders under %s): %w", f, base, err)
 		}
 	}
 
-	return writeActiveMode(to)
+	return writeActiveMode(base, to)
 }
 
 // ---- Menu / main ---------------------------------------------------------
@@ -422,48 +453,79 @@ func pause() {
 	_, _ = stdin.ReadString('\n')
 }
 
+// flavorState carries a prepared (bootstrapped, validated, synced) flavor into
+// the switch phase.
+type flavorState struct {
+	base   string
+	name   string
+	active string
+}
+
 func run() error {
 	fmt.Println("=== WoW Profile Switcher ===")
-	fmt.Printf("Game dir: %s\n\n", base())
 
-	if !isDir(base()) {
-		return fmt.Errorf("game directory not found: %s\n  Set WOW_BASE to the correct _flavor_ folder", base())
+	all := bases()
+	var present []string
+	for _, b := range all {
+		if isDir(b) {
+			present = append(present, b)
+		} else {
+			fmt.Printf("Skipping (not installed): %s\n", b)
+		}
+	}
+	if len(present) == 0 {
+		return fmt.Errorf("no WoW flavor directories found.\n  Looked for: %s\n"+
+			"  Set WOW_ROOT to your World of Warcraft install folder", strings.Join(all, ", "))
 	}
 
 	if isWowRunning() {
 		return fmt.Errorf("WowClassic.exe is currently running.\n  Close the game completely before switching profiles")
 	}
 
-	active, err := resolveActiveMode()
-	if err != nil {
-		return err
-	}
-	if err := validateState(active); err != nil {
-		return err
+	// Prepare each flavor: bootstrap, validate, sync addons.
+	var states []flavorState
+	var totalCopied, totalUpdated int
+	for _, b := range present {
+		name := flavorName(b)
+		fmt.Printf("\n--- %s ---\n", name)
+		fmt.Printf("Game dir: %s\n", b)
+
+		active, err := resolveActiveMode(b)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if err := validateState(b, active); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		inactive := other(active)
+		fmt.Printf("Current mode: %s\n", label(active))
+
+		fmt.Print("Syncing addons (excluding ConsolePort)... ")
+		copied, updated, err := syncAddons(
+			filepath.Join(livePath(b, "Interface"), "AddOns"),
+			filepath.Join(dormantPath(b, "Interface", inactive), "AddOns"),
+		)
+		if err != nil {
+			fmt.Println("FAILED")
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		fmt.Printf("done (%d copied, %d updated).\n", copied, updated)
+		totalCopied += copied
+		totalUpdated += updated
+
+		states = append(states, flavorState{base: b, name: name, active: active})
 	}
 
-	inactive := other(active)
-	fmt.Printf("Current mode: %s\n", label(active))
-
-	// Sync non-ConsolePort addons between the live and dormant profiles.
-	fmt.Print("Syncing addons (excluding ConsolePort)... ")
-	copied, updated, err := syncAddons(
-		filepath.Join(livePath("Interface"), "AddOns"),
-		filepath.Join(dormantPath("Interface", inactive), "AddOns"),
-	)
-	if err != nil {
-		fmt.Println("FAILED")
-		return err
-	}
-	fmt.Printf("done (%d copied, %d updated).\n", copied, updated)
-	if copied > 0 || updated > 0 {
+	if totalCopied > 0 || totalUpdated > 0 {
+		fmt.Println()
 		fmt.Println("Note: addon uninstalls are not propagated — remove an addon from")
-		fmt.Println("both profiles if you want it gone everywhere.")
+		fmt.Println("both profiles to delete it everywhere. Addons sync within each")
+		fmt.Println("flavor only, never across flavors.")
 	}
 	fmt.Println()
 
-	// Menu.
-	fmt.Println("Choose a profile to activate:")
+	// Single menu; the chosen mode is applied to every installed flavor.
+	fmt.Println("Choose a profile to activate (applies to all flavors above):")
 	fmt.Printf("  [1] %s\n", label(modeKBM))
 	fmt.Printf("  [2] %s\n", label(modeCP))
 	fmt.Println("  [q] Quit (no change)")
@@ -482,18 +544,24 @@ func run() error {
 		return nil
 	}
 
-	if target == active {
-		fmt.Printf("%s is already active. Nothing to do.\n", label(active))
-		return nil
+	fmt.Println()
+	var switched, already int
+	for _, st := range states {
+		if st.active == target {
+			fmt.Printf("%s: %s already active.\n", st.name, label(target))
+			already++
+			continue
+		}
+		fmt.Printf("%s: switching to %s... ", st.name, label(target))
+		if err := switchProfile(st.base, st.active, target); err != nil {
+			fmt.Println("FAILED")
+			return fmt.Errorf("%s: %w", st.name, err)
+		}
+		fmt.Println("done.")
+		switched++
 	}
 
-	fmt.Printf("Switching to %s... ", label(target))
-	if err := switchProfile(active, target); err != nil {
-		fmt.Println("FAILED")
-		return err
-	}
-	fmt.Println("done.")
-	fmt.Printf("Active profile is now: %s\n", label(target))
+	fmt.Printf("\nActive profile is now: %s (%d switched, %d already set).\n", label(target), switched, already)
 	return nil
 }
 
